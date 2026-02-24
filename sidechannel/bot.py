@@ -49,6 +49,7 @@ class SignalBot:
         if self.config.sidechannel_assistant_enabled:
             try:
                 from .sidechannel_runner import SidechannelRunner
+
                 self.sidechannel_runner = SidechannelRunner(
                     api_url=self.config.sidechannel_assistant_api_url,
                     api_key=self.config.sidechannel_assistant_api_key,
@@ -77,7 +78,7 @@ class SignalBot:
         self.memory = MemoryManager(
             db_path=memory_db_path,
             session_timeout_minutes=self.config.memory_session_timeout,
-            max_context_tokens=self.config.memory_max_context_tokens
+            max_context_tokens=self.config.memory_max_context_tokens,
         )
         self.memory_commands = MemoryCommands(self.memory)
 
@@ -106,8 +107,11 @@ class SignalBot:
         # Warn if non-localhost Signal API is not using HTTPS
         parsed = urlparse(self.config.signal_api_url)
         if parsed.hostname not in ("127.0.0.1", "localhost", "::1") and parsed.scheme != "https":
-            logger.warning("insecure_signal_api_url", url=self.config.signal_api_url,
-                           msg="Non-localhost Signal API should use HTTPS")
+            logger.warning(
+                "insecure_signal_api_url",
+                url=self.config.signal_api_url,
+                msg="Non-localhost Signal API should use HTTPS",
+            )
 
         # Get the registered account
         await self._get_account()
@@ -225,11 +229,7 @@ class SignalBot:
 
         try:
             url = f"{self.config.signal_api_url}/v2/send"
-            payload = {
-                "number": self.account,
-                "recipients": [recipient],
-                "message": message
-            }
+            payload = {"number": self.account, "recipients": [recipient], "message": message}
 
             async with self.session.post(url, json=payload) as resp:
                 if resp.status == 201:
@@ -241,9 +241,7 @@ class SignalBot:
         except Exception as e:
             logger.error("send_error", error=str(e))
 
-    async def _send_file(
-        self, recipient: str, file_path: Path, message: Optional[str] = None
-    ):
+    async def _send_file(self, recipient: str, file_path: Path, message: Optional[str] = None):
         """Send a file attachment via Signal.
 
         Args:
@@ -267,11 +265,17 @@ class SignalBot:
         try:
             file_data = file_path.read_bytes()
             b64_data = base64.b64encode(file_data).decode("ascii")
-            filename = file_path.name
+            # Sanitize filename for data URI: keep only safe chars
+            raw_name = file_path.name
+            safe_filename = "".join(c if c.isalnum() or c in "._-" else "_" for c in raw_name)
+            if not safe_filename:
+                safe_filename = "attachment"
             # Signal CLI REST API base64 attachment format
-            b64_attachment = f"data:application/octet-stream;filename={filename};base64,{b64_data}"
+            b64_attachment = (
+                f"data:application/octet-stream;" f"filename={safe_filename};base64,{b64_data}"
+            )
 
-            text = f"[sidechannel] {message}" if message else f"[sidechannel] 📎 {filename}"
+            text = f"[sidechannel] {message}" if message else f"[sidechannel] 📎 {safe_filename}"
 
             url = f"{self.config.signal_api_url}/v2/send"
             payload = {
@@ -338,11 +342,15 @@ class SignalBot:
                 if loop_status.is_running:
                     auto_info = "\n\nAutonomous Loop: Running"
                     if loop_status.current_task_id:
-                        current_task = await self.autonomous_manager.db.get_task(loop_status.current_task_id)
+                        current_task = await self.autonomous_manager.db.get_task(
+                            loop_status.current_task_id
+                        )
                         if current_task:
                             elapsed_auto = ""
                             if current_task.started_at:
-                                mins = int((datetime.now() - current_task.started_at).total_seconds() / 60)
+                                mins = int(
+                                    (datetime.now() - current_task.started_at).total_seconds() / 60
+                                )
                                 elapsed_auto = f" ({mins}m)"
                             auto_info += f"\nCurrent: {current_task.title[:50]}{elapsed_auto}"
                     auto_info += f"\nQueued: {loop_status.tasks_queued}"
@@ -398,9 +406,7 @@ class SignalBot:
 
             await self._send_message(sender, "Analyzing project...")
             self._start_background_task(
-                sender,
-                f"Answer this question about the codebase: {args}",
-                current_project
+                sender, f"Answer this question about the codebase: {args}", current_project
             )
             return None  # Response will be sent when task completes
 
@@ -449,7 +455,7 @@ class SignalBot:
                 "Provide a comprehensive summary of this project including "
                 "its structure, main technologies used, and any recent changes "
                 "visible in git history.",
-                current_project
+                current_project,
             )
             return None  # Response will be sent when task completes
 
@@ -564,7 +570,7 @@ AI Assistant:
   /sidechannel <question> - Ask the AI assistant anything
   Or just: sidechannel <question>
 
-""" + help_text[len("sidechannel Commands:\n\n"):]
+""" + help_text[len("sidechannel Commands:\n\n") :]
 
         # Append plugin help sections
         for section in self.plugin_loader.get_all_help():
@@ -574,8 +580,9 @@ AI Assistant:
 
         return help_text
 
-    async def _get_memory_context(self, sender: str, query: str,
-                                   project_name: Optional[str] = None) -> Optional[str]:
+    async def _get_memory_context(
+        self, sender: str, query: str, project_name: Optional[str] = None
+    ) -> Optional[str]:
         """Get memory context for a Claude prompt.
 
         Args:
@@ -594,14 +601,16 @@ AI Assistant:
                 query=query,
                 project_name=project_name,
                 max_results=5,
-                max_tokens=self.config.memory_max_context_tokens
+                max_tokens=self.config.memory_max_context_tokens,
             )
             return context if context else None
         except Exception as e:
             logger.warning("memory_context_error", error=str(e))
             return None
 
-    def _start_background_task(self, sender: str, task_description: str, project_name: Optional[str]):
+    def _start_background_task(
+        self, sender: str, task_description: str, project_name: Optional[str]
+    ):
         """Start a Claude task in the background (non-blocking).
 
         This allows other commands to be processed while the task runs.
@@ -617,13 +626,16 @@ AI Assistant:
 
         async def run_task():
             try:
+
                 async def progress_cb(msg: str):
                     task_state["step"] = msg
                     await self._send_message(sender, msg)
 
                 # Get memory context for this task (use project_name captured at creation)
                 task_state["step"] = "Loading memory context..."
-                memory_context = await self._get_memory_context(sender, task_description, project_name)
+                memory_context = await self._get_memory_context(
+                    sender, task_description, project_name
+                )
 
                 task_state["step"] = "Claude executing task..."
                 # Pass project_path directly to avoid shared-state race condition
@@ -642,7 +654,7 @@ AI Assistant:
                         role="assistant",
                         content=response,
                         project_name=project_name,
-                        command_type="do"
+                        command_type="do",
                     )
                 )
                 t.add_done_callback(_log_task_exception)
@@ -836,7 +848,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 phone_number=sender,
                 project_name=project_name,
                 title=breakdown["prd_title"],
-                description=breakdown["prd_description"]
+                description=breakdown["prd_description"],
             )
 
             total_tasks = 0
@@ -850,7 +862,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                     prd_id=prd.id,
                     phone_number=sender,
                     title=story_data["title"],
-                    description=story_data["description"]
+                    description=story_data["description"],
                 )
 
                 task_count = 0
@@ -861,7 +873,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                         project_name=project_name,
                         title=task_data["title"],
                         description=task_data["description"],
-                        priority=task_data.get("priority", 5)
+                        priority=task_data.get("priority", 5),
                     )
                     task_count += 1
                     total_tasks += 1
@@ -909,7 +921,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
         # Check rate limit
         if not check_rate_limit(sender):
             logger.warning("rate_limited", sender="..." + sender[-4:])
-            await self._send_message(sender, "Rate limited. Please wait before sending more messages.")
+            await self._send_message(
+                sender, "Rate limited. Please wait before sending more messages."
+            )
             return
 
         # Sanitize input
@@ -924,11 +938,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
         if not message:
             return
 
-        logger.info(
-            "message_received",
-            sender="..." + sender[-4:],
-            length=len(message)
-        )
+        logger.info("message_received", sender="..." + sender[-4:], length=len(message))
 
         # Determine command type for memory logging
         command_type = None
@@ -944,7 +954,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 role="user",
                 content=message,
                 project_name=project_name,
-                command_type=command_type
+                command_type=command_type,
             )
         )
         t.add_done_callback(_log_task_exception)
@@ -980,7 +990,6 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 else:
                     response = "No project selected. Use /projects to list or /select <project> to choose one."
 
-
         # If response is None, the task is running in background
         if response is None:
             return
@@ -992,7 +1001,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 role="assistant",
                 content=response,
                 project_name=project_name,
-                command_type=command_type
+                command_type=command_type,
             )
         )
         t.add_done_callback(_log_task_exception)
@@ -1027,9 +1036,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                         attachments_dir=attachments_dir,
                     )
                     if not file_path:
-                        await self._send_message(
-                            sender, "❌ Failed to download the attachment."
-                        )
+                        await self._send_message(sender, "❌ Failed to download the attachment.")
                         return True
 
                     logger.info(
@@ -1039,9 +1046,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                         saved_path=str(file_path),
                     )
 
-                    response = await handler.handle_fn(
-                        sender, file_path, filename, message
-                    )
+                    response = await handler.handle_fn(sender, file_path, filename, message)
                     if response:
                         await self._send_message(sender, response)
                     return True
@@ -1084,7 +1089,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             return
 
         # Convert http:// to ws:// for websocket connection
-        ws_base = self.config.signal_api_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_base = self.config.signal_api_url.replace("http://", "ws://").replace(
+            "https://", "wss://"
+        )
         ws_url = f"{ws_base}/v1/receive/{self.account}"
 
         reconnect_delay = 5
@@ -1137,7 +1144,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 sent_message = sync_message.get("sentMessage")
                 if sent_message:
                     # Check destination - only process messages sent to our own number
-                    destination = sent_message.get("destination") or sent_message.get("destinationNumber")
+                    destination = sent_message.get("destination") or sent_message.get(
+                        "destinationNumber"
+                    )
 
                     # Ignore group messages
                     if sent_message.get("groupInfo"):
