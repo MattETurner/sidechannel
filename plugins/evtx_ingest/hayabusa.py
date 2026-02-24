@@ -227,7 +227,11 @@ async def run_hayabusa(
     # Build command
     cmd = [
         binary,
-        "csv-timeline" if output_format == "csv" else "json-timeline",
+        (
+            "csv-timeline"
+            if output_format == "csv"
+            else "json-timeline" if output_format == "jsonl" else "csv-timeline"
+        ),
         "--no-wizard",
         "-f",
         str(evtx),

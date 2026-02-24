@@ -193,7 +193,7 @@ class EvtxIngestPlugin(SidechannelPlugin):
             HelpSection(
                 title="Incident Response — EVTX Ingest",
                 commands={
-                    "ingest": "Analyze a Windows .evtx file with Hayabusa (usage: /ingest <path>)",
+                    "ingest": "Analyze a Windows .evtx file with Hayabusa",
                     "ingest-status": "Check status of the current analysis",
                     "ingest-results": "Show the latest analysis results summary",
                 },
