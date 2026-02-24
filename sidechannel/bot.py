@@ -1112,8 +1112,12 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 else:
                     break
 
-            logger.info("processing_message", source="..." + source[-4:], length=len(effective_text),
-                        attachments=len(saved_files))
+            logger.info(
+                "processing_message",
+                source="..." + source[-4:],
+                length=len(effective_text),
+                attachments=len(saved_files),
+            )
             await self._process_message(source, effective_text)
 
         except Exception as e:

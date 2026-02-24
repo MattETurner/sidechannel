@@ -41,7 +41,7 @@ ALLOWED_FILE_EXTENSIONS = {
     ".md", ".pdf", ".zip", ".gz", ".tar", ".pcap", ".cap",
     ".html", ".htm", ".rtf", ".doc", ".docx", ".xls", ".xlsx",
     ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".go", ".rs",
-    ".sh", ".bat", ".ps1", ".conf", ".cfg", ".ini", ".toml",
+    ".conf", ".cfg", ".ini", ".toml",
 }
 
 
@@ -103,9 +103,10 @@ def _resolve_extension(content_type: str, original_filename: Optional[str] = Non
     if content_type in SUPPORTED_IMAGE_TYPES:
         return SUPPORTED_IMAGE_TYPES[content_type]
 
-    # Try to get extension from original filename
+    # Try to get extension from original filename (use basename to prevent traversal)
     if original_filename:
-        ext = Path(original_filename).suffix.lower()
+        safe_name = Path(original_filename).name
+        ext = Path(safe_name).suffix.lower()
         if ext and ext in ALLOWED_FILE_EXTENSIONS:
             return ext
 
