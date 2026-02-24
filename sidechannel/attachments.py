@@ -38,7 +38,7 @@ async def download_attachment(
         Attachment bytes or None if download fails
     """
     # Validate attachment_id to prevent SSRF
-    if not re.match(r'^[a-zA-Z0-9_=-]+$', str(attachment_id)):
+    if not re.match(r"^[a-zA-Z0-9_=-]+$", str(attachment_id)):
         logger.warning("invalid_attachment_id", attachment_id=str(attachment_id)[:20])
         return None
 
@@ -52,7 +52,9 @@ async def download_attachment(
                 async for chunk in resp.content.iter_chunked(8192):
                     total += len(chunk)
                     if total > MAX_ATTACHMENT_SIZE:
-                        logger.warning("attachment_too_large_streaming", attachment_id=attachment_id)
+                        logger.warning(
+                            "attachment_too_large_streaming", attachment_id=attachment_id
+                        )
                         return None
                     chunks.append(chunk)
                 data = b"".join(chunks)
@@ -62,7 +64,9 @@ async def download_attachment(
                 logger.error("attachment_download_failed", id=attachment_id, status=resp.status)
                 return None
     except aiohttp.ClientError as e:
-        logger.error("attachment_download_error", id=attachment_id, error=str(e), error_type=type(e).__name__)
+        logger.error(
+            "attachment_download_error", id=attachment_id, error=str(e), error_type=type(e).__name__
+        )
         return None
 
 
@@ -92,7 +96,7 @@ def save_attachment(
     unique_id = uuid.uuid4().hex[:8]
     filename = f"{timestamp}_{unique_id}{ext}"
 
-    safe_sender = re.sub(r'[^\d]', '', sender)
+    safe_sender = re.sub(r"[^\d]", "", sender)
     if not safe_sender:
         safe_sender = "unknown"
     user_dir = attachments_dir / safe_sender
@@ -104,7 +108,9 @@ def save_attachment(
         logger.info("attachment_saved", path=str(file_path), size=len(attachment_data))
         return file_path
     except OSError as e:
-        logger.error("attachment_save_error", path=str(file_path), error=str(e), error_type=type(e).__name__)
+        logger.error(
+            "attachment_save_error", path=str(file_path), error=str(e), error_type=type(e).__name__
+        )
         return None
 
 
@@ -150,3 +156,85 @@ async def process_attachments(
             saved_images.append(file_path)
 
     return saved_images
+
+
+def save_any_attachment(
+    attachment_data: bytes,
+    filename: str,
+    sender: str,
+    attachments_dir: Path,
+) -> Optional[Path]:
+    """Save any attachment type to disk (not just images).
+
+    Args:
+        attachment_data: Raw attachment bytes
+        filename: Original filename (used for extension; sanitized)
+        sender: Phone number of sender (for organizing files)
+        attachments_dir: Base directory for attachments
+
+    Returns:
+        Path to saved file or None on error
+    """
+    # Sanitize filename: keep only basename, replace unsafe chars
+    safe_name = re.sub(r"[^\w.\-]", "_", Path(filename).name)
+    if not safe_name:
+        safe_name = "attachment"
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = uuid.uuid4().hex[:8]
+    # Preserve original extension from filename
+    stem = Path(safe_name).stem
+    ext = Path(safe_name).suffix or ""
+    dest_name = f"{timestamp}_{unique_id}_{stem}{ext}"
+
+    safe_sender = re.sub(r"[^\d]", "", sender)
+    if not safe_sender:
+        safe_sender = "unknown"
+    user_dir = attachments_dir / safe_sender
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = user_dir / dest_name
+    try:
+        file_path.write_bytes(attachment_data)
+        logger.info("attachment_saved", path=str(file_path), size=len(attachment_data))
+        return file_path
+    except OSError as e:
+        logger.error(
+            "attachment_save_error",
+            path=str(file_path),
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        return None
+
+
+async def download_and_save_any(
+    attachment: dict,
+    sender: str,
+    session: aiohttp.ClientSession,
+    signal_api_url: str,
+    attachments_dir: Path,
+) -> Optional[Path]:
+    """Download and save any attachment type from Signal.
+
+    Args:
+        attachment: Attachment dict from Signal API (with 'id', 'contentType', 'filename')
+        sender: Phone number of sender
+        session: aiohttp session for HTTP requests
+        signal_api_url: Base URL of the Signal API
+        attachments_dir: Base directory for attachments
+
+    Returns:
+        Path to saved file or None if download/save fails
+    """
+    attachment_id = attachment.get("id")
+    if not attachment_id:
+        logger.warning("attachment_missing_id", attachment=attachment)
+        return None
+
+    filename = attachment.get("filename") or attachment.get("id", "attachment")
+    data = await download_attachment(session, signal_api_url, attachment_id)
+    if not data:
+        return None
+
+    return save_any_attachment(data, filename, sender, attachments_dir)

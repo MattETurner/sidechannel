@@ -7,9 +7,12 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
 
-
 # Type alias for command handlers: async (sender: str, args: str) -> str
 CommandHandler = Callable[[str, str], Awaitable[str]]
+
+# Type alias for attachment handlers:
+#   async (sender: str, file_path: Path, filename: str, message: str) -> str
+AttachmentHandlerFn = Callable[[str, Path, str, str], Awaitable[str]]
 
 
 @dataclass
@@ -22,9 +25,30 @@ class MessageMatcher:
         handle_fn: Async function (sender: str, message: str) -> str.
         description: Human-readable label for logging.
     """
+
     priority: int
     match_fn: Callable[[str], bool]
     handle_fn: Callable[[str, str], Awaitable[str]]
+    description: str = ""
+
+
+@dataclass
+class AttachmentHandler:
+    """A priority-ordered attachment interceptor registered by a plugin.
+
+    Plugins register these to handle file attachments sent via Signal.
+    The bot downloads attachments to disk, then routes to matching handlers.
+
+    Attributes:
+        priority: Lower numbers are checked first (0-99).
+        match_fn: Sync function (filename: str, content_type: str) -> bool.
+        handle_fn: Async function (sender, file_path, filename, message) -> str.
+        description: Human-readable label for logging.
+    """
+
+    priority: int
+    match_fn: Callable[[str, str], bool]
+    handle_fn: AttachmentHandlerFn
     description: str = ""
 
 
@@ -36,6 +60,7 @@ class HelpSection:
         title: Section heading (e.g. "Music Control").
         commands: Dict of command_name -> one-line description.
     """
+
     title: str
     commands: Dict[str, str] = field(default_factory=dict)
 
@@ -54,9 +79,11 @@ class PluginContext:
         settings: dict,
         allowed_numbers: List[str],
         data_dir: Path,
+        send_file: Optional[Callable[[str, Path, Optional[str]], Awaitable[None]]] = None,
     ):
         self.plugin_name = plugin_name
         self._send_message = send_message
+        self._send_file = send_file
         # Only expose the plugin's own config section, not full settings
         self._plugin_settings = settings.get("plugins", {}).get(plugin_name, {})
         self.allowed_numbers = list(allowed_numbers)  # Read-only copy
@@ -79,6 +106,19 @@ class PluginContext:
     async def send_message(self, recipient: str, message: str) -> None:
         """Send a Signal message to a recipient."""
         await self._send_message(recipient, message)
+
+    async def send_file(self, recipient: str, file_path: Path, message: str = "") -> None:
+        """Send a file attachment via Signal to a recipient.
+
+        Args:
+            recipient: Phone number of the recipient.
+            file_path: Path to the file to send.
+            message: Optional text message to accompany the file.
+        """
+        if self._send_file:
+            await self._send_file(recipient, file_path, message)
+        else:
+            self.logger.warning("send_file_not_available")
 
 
 class SidechannelPlugin:
@@ -106,6 +146,15 @@ class SidechannelPlugin:
         """Return message matchers for priority-based interception.
 
         Lower priority numbers are checked first.
+        """
+        return []
+
+    def attachment_handlers(self) -> List[AttachmentHandler]:
+        """Return attachment handlers for file-based interception.
+
+        When a Signal message includes file attachments, the bot downloads
+        them and routes to matching handlers. Lower priority numbers are
+        checked first.
         """
         return []
 

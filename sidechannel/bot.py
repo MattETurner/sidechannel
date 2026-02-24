@@ -1,26 +1,28 @@
 """Signal bot implementation for sidechannel."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import time as _time
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import aiohttp
 import structlog
 
-from .config import get_config
-from .security import is_authorized, sanitize_input, check_rate_limit
+from .attachments import download_and_save_any
+from .autonomous import AutonomousCommands, AutonomousManager
 from .claude_runner import get_runner
-from .project_manager import get_project_manager
-from .memory import MemoryManager, MemoryCommands
-from .autonomous import AutonomousManager, AutonomousCommands
+from .config import get_config
+from .memory import MemoryCommands, MemoryManager
 from .plugin_loader import PluginLoader
-from .prd_builder import clean_json_string, extract_balanced_json, parse_prd_json
+from .prd_builder import parse_prd_json
+from .project_manager import get_project_manager
+from .security import check_rate_limit, is_authorized, sanitize_input
 
 logger = structlog.get_logger()
 
@@ -92,6 +94,7 @@ class SignalBot:
             send_message=self._send_message,
             allowed_numbers=self.config.allowed_numbers,
             data_dir=plugins_data_dir,
+            send_file=self._send_file,
         )
         self.plugin_loader.discover_and_load()
 
@@ -237,6 +240,65 @@ class SignalBot:
 
         except Exception as e:
             logger.error("send_error", error=str(e))
+
+    async def _send_file(
+        self, recipient: str, file_path: Path, message: Optional[str] = None
+    ):
+        """Send a file attachment via Signal.
+
+        Args:
+            recipient: Phone number of the recipient.
+            file_path: Path to the file to send.
+            message: Optional text message to accompany the file.
+        """
+        if not self.account:
+            logger.error("no_account_for_sending")
+            return
+
+        if not is_authorized(recipient):
+            logger.warning("blocked_send_to_unauthorized", recipient="..." + recipient[-4:])
+            return
+
+        file_path = Path(file_path)
+        if not file_path.is_file():
+            logger.error("send_file_not_found", path=str(file_path))
+            return
+
+        try:
+            file_data = file_path.read_bytes()
+            b64_data = base64.b64encode(file_data).decode("ascii")
+            filename = file_path.name
+            # Signal CLI REST API base64 attachment format
+            b64_attachment = f"data:application/octet-stream;filename={filename};base64,{b64_data}"
+
+            text = f"[sidechannel] {message}" if message else f"[sidechannel] 📎 {filename}"
+
+            url = f"{self.config.signal_api_url}/v2/send"
+            payload = {
+                "number": self.account,
+                "recipients": [recipient],
+                "message": text,
+                "base64_attachments": [b64_attachment],
+            }
+
+            async with self.session.post(url, json=payload) as resp:
+                if resp.status == 201:
+                    logger.info(
+                        "file_sent",
+                        recipient="..." + recipient[-4:],
+                        filename=filename,
+                        size=len(file_data),
+                    )
+                else:
+                    resp_text = await resp.text()
+                    logger.error(
+                        "file_send_failed",
+                        status=resp.status,
+                        response=resp_text,
+                    )
+
+        except Exception as e:
+            logger.error("file_send_error", error=str(e), path=str(file_path))
 
     async def _handle_command(self, command: str, args: str, sender: str) -> str:
         """Handle a bot command."""
@@ -835,7 +897,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             logger.error("prd_creation_error", error=str(e), exc_type=type(e).__name__)
             return "PRD creation failed. Please try again or check logs."
 
-    async def _process_message(self, sender: str, message: str):
+    async def _process_message(
+        self, sender: str, message: str, attachments: Optional[List[dict]] = None
+    ):
         """Process an incoming message."""
         # Check authorization
         if not is_authorized(sender):
@@ -849,7 +913,13 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             return
 
         # Sanitize input
-        message = sanitize_input(message.strip())
+        message = sanitize_input(message.strip()) if message else ""
+
+        # Handle attachment-based workflows
+        if attachments:
+            handled = await self._process_attachments(sender, message, attachments)
+            if handled:
+                return
 
         if not message:
             return
@@ -929,6 +999,55 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
 
         await self._send_message(sender, response)
 
+    async def _process_attachments(
+        self, sender: str, message: str, attachments: List[dict]
+    ) -> bool:
+        """Download attachments and route to plugin attachment handlers.
+
+        Returns True if an attachment handler handled the message.
+        """
+        handlers = self.plugin_loader.get_sorted_attachment_handlers()
+        if not handlers:
+            return False
+
+        attachments_dir = Path(self.config.config_dir).parent / "data" / "attachments"
+
+        for attachment in attachments:
+            filename = attachment.get("filename", "")
+            content_type = attachment.get("contentType", "")
+
+            for handler in handlers:
+                if handler.match_fn(filename, content_type):
+                    # Download and save the attachment
+                    file_path = await download_and_save_any(
+                        attachment=attachment,
+                        sender=sender,
+                        session=self.session,
+                        signal_api_url=self.config.signal_api_url,
+                        attachments_dir=attachments_dir,
+                    )
+                    if not file_path:
+                        await self._send_message(
+                            sender, "❌ Failed to download the attachment."
+                        )
+                        return True
+
+                    logger.info(
+                        "attachment_routed_to_handler",
+                        filename=filename,
+                        handler=handler.description,
+                        saved_path=str(file_path),
+                    )
+
+                    response = await handler.handle_fn(
+                        sender, file_path, filename, message
+                    )
+                    if response:
+                        await self._send_message(sender, response)
+                    return True
+
+        return False
+
     def _is_sidechannel_query(self, message: str) -> bool:
         """Detect if a message is addressed to sidechannel assistant."""
         if not self.sidechannel_runner:
@@ -1004,11 +1123,13 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             envelope = msg.get("envelope", {})
             source = envelope.get("source") or envelope.get("sourceNumber")
             message_text = None
+            attachments = None
 
             # Check for regular data message (from others TO us)
             data_message = envelope.get("dataMessage")
             if data_message:
                 message_text = data_message.get("message", "")
+                attachments = data_message.get("attachments")
 
             # Check for sync message (our own messages sent from another device)
             sync_message = envelope.get("syncMessage")
@@ -1027,17 +1148,24 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                         message_text = sent_message.get("message", "")
                         source = self.account
 
-            # Ignore receipts, typing indicators, and other message types
-            if not message_text or not message_text.strip():
+            # Allow processing if there are attachments even without text
+            has_text = message_text and message_text.strip()
+            has_attachments = attachments and len(attachments) > 0
+            if not has_text and not has_attachments:
                 return
 
             # SECURITY: Only process messages from authorized sources
             if not source:
                 return
 
+            # Default empty message text when only attachments are sent
+            if not message_text:
+                message_text = ""
+
             # Deduplication: Signal sends both dataMessage and syncMessage for self-messages
             timestamp = envelope.get("timestamp", 0)
-            msg_hash = hashlib.sha256(f"{timestamp}:{message_text.strip()}".encode()).hexdigest()
+            dedup_key = message_text.strip() if message_text else str(timestamp)
+            msg_hash = hashlib.sha256(f"{timestamp}:{dedup_key}".encode()).hexdigest()
             if msg_hash in self._processed_messages:
                 logger.debug("duplicate_message_skipped", timestamp=timestamp)
                 return
@@ -1053,7 +1181,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                     break
 
             logger.info("processing_message", source="..." + source[-4:], length=len(message_text))
-            await self._process_message(source, message_text)
+            await self._process_message(source, message_text, attachments)
 
         except Exception as e:
             logger.error("message_handling_error", error=str(e), msg=str(msg)[:200])

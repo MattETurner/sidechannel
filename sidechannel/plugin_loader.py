@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 import structlog
 
 from .plugin_base import (
+    AttachmentHandler,
     CommandHandler,
     HelpSection,
     MessageMatcher,
@@ -32,7 +33,7 @@ if _parent_pkg != "sidechannel":
     _prefix = _parent_pkg + "."
     for _key, _mod in list(sys.modules.items()):
         if _key.startswith(_prefix):
-            _alias = "sidechannel" + _key[len(_parent_pkg):]
+            _alias = "sidechannel" + _key[len(_parent_pkg) :]
             sys.modules[_alias] = _mod
 
 
@@ -46,15 +47,18 @@ class PluginLoader:
         send_message: Callable[[str, str], Awaitable[None]],
         allowed_numbers: List[str],
         data_dir: Path,
+        send_file: Optional[Callable] = None,
     ):
         self.plugins_dir = plugins_dir
         self._settings = settings
         self._send_message = send_message
+        self._send_file = send_file
         self._allowed_numbers = allowed_numbers
         self._data_dir = data_dir
         self.plugins: List[SidechannelPlugin] = []
         self._commands: Dict[str, CommandHandler] = {}
         self._matchers: List[MessageMatcher] = []
+        self._attachment_handlers: List[AttachmentHandler] = []
         self._help: List[HelpSection] = []
 
     def discover_and_load(self) -> None:
@@ -146,26 +150,51 @@ class PluginLoader:
             settings=self._settings,
             allowed_numbers=self._allowed_numbers,
             data_dir=self._data_dir,
+            send_file=self._send_file,
         )
 
         plugin = plugin_cls(ctx)
         self.plugins.append(plugin)
 
         # Collect commands (with validation)
-        BUILTIN_COMMANDS = frozenset({
-            "help", "projects", "select", "add", "new", "ask", "do",
-            "complex", "cancel", "summary", "remember", "recall",
-            "history", "forget", "memories", "preferences", "global",
-            "prd", "story", "task", "tasks", "autonomous", "queue",
-            "learnings", "status",
-        })
+        BUILTIN_COMMANDS = frozenset(
+            {
+                "help",
+                "projects",
+                "select",
+                "add",
+                "new",
+                "ask",
+                "do",
+                "complex",
+                "cancel",
+                "summary",
+                "remember",
+                "recall",
+                "history",
+                "forget",
+                "memories",
+                "preferences",
+                "global",
+                "prd",
+                "story",
+                "task",
+                "tasks",
+                "autonomous",
+                "queue",
+                "learnings",
+                "status",
+            }
+        )
 
         for cmd_name, handler in plugin.commands().items():
-            if not re.match(r'^[a-z][a-z0-9_-]*$', cmd_name):
+            if not re.match(r"^[a-z][a-z0-9_-]*$", cmd_name):
                 logger.warning("plugin_invalid_command_name", command=cmd_name, plugin=plugin_name)
                 continue
             if cmd_name in BUILTIN_COMMANDS:
-                logger.warning("plugin_builtin_override_blocked", command=cmd_name, plugin=plugin_name)
+                logger.warning(
+                    "plugin_builtin_override_blocked", command=cmd_name, plugin=plugin_name
+                )
                 continue
             if cmd_name in self._commands:
                 logger.warning(
@@ -178,6 +207,9 @@ class PluginLoader:
 
         # Collect matchers
         self._matchers.extend(plugin.message_matchers())
+
+        # Collect attachment handlers
+        self._attachment_handlers.extend(plugin.attachment_handlers())
 
         # Collect help
         self._help.extend(plugin.help_sections())
@@ -222,6 +254,10 @@ class PluginLoader:
     def get_sorted_matchers(self) -> List[MessageMatcher]:
         """Return all matchers sorted by priority (lower first)."""
         return sorted(self._matchers, key=lambda m: m.priority)
+
+    def get_sorted_attachment_handlers(self) -> List[AttachmentHandler]:
+        """Return all attachment handlers sorted by priority (lower first)."""
+        return sorted(self._attachment_handlers, key=lambda h: h.priority)
 
     def get_all_help(self) -> List[HelpSection]:
         """Return merged help sections from all plugins."""

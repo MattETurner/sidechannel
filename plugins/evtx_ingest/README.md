@@ -4,7 +4,8 @@ Incident response analyst ingest workflow plugin for sidechannel. Analyzes Windo
 
 ## Features
 
-- **Ingest Windows event logs** — Analyze `.evtx` files directly from Signal
+- **Signal attachment ingest** — Send `.evtx` files directly via Signal and receive results automatically
+- **Output file delivery** — Results are sent back as both a text summary and a downloadable file attachment
 - **Hayabusa integration** — Automatic detection rule matching with severity classification
 - **Background analysis** — Non-blocking analysis with status tracking and notifications
 - **Severity breakdown** — Critical, high, medium, low, and informational detection counts
@@ -36,15 +37,20 @@ sudo mv hayabusa /usr/local/bin/
 
 ## Usage
 
+### Via Signal Attachment (Recommended)
+
+Simply send a `.evtx` file as an attachment via Signal. The plugin will:
+1. Detect the `.evtx` file automatically
+2. Download it from Signal
+3. Run Hayabusa analysis in the background
+4. Send back a severity summary as a text message
+5. Send the full results file as a Signal attachment
+
+### Via Command
+
 ```
 /ingest /cases/evidence/Security.evtx
 ```
-
-The plugin will:
-1. Validate the `.evtx` file exists
-2. Launch Hayabusa analysis in the background
-3. Send a Signal notification when complete with a severity summary
-4. Store full results in the plugin data directory
 
 ## Configuration
 
@@ -64,6 +70,8 @@ plugins:
 ## Output
 
 Analysis results are stored in `data/plugins/evtx_ingest/results/` with filenames like `Security_hayabusa.csv`.
+
+When ingesting via Signal attachment, the output file is also sent back as a Signal attachment for easy download.
 
 Example summary output:
 

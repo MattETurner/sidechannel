@@ -3,17 +3,29 @@
 Provides analyst ingest workflows for Windows event log (.evtx) files
 using Hayabusa for detection and timeline generation.
 
+Analysts can send .evtx files directly via Signal as attachments, or
+reference a file path on the server with the /ingest command.
+
 Commands:
     /ingest <path>     — Run Hayabusa analysis on a Windows event log file.
     /ingest-status     — Check status of the current analysis.
     /ingest-results    — Show the latest analysis results summary.
+
+Attachment workflow:
+    Send a .evtx file via Signal → plugin auto-detects and analyzes it →
+    results are sent back as both a text summary and the output file.
 """
 
 import asyncio
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from sidechannel.plugin_base import CommandHandler, HelpSection, SidechannelPlugin
+from sidechannel.plugin_base import (
+    AttachmentHandler,
+    CommandHandler,
+    HelpSection,
+    SidechannelPlugin,
+)
 
 from .hayabusa import HayabusaResult, find_hayabusa_binary, run_hayabusa
 
@@ -23,7 +35,7 @@ class EvtxIngestPlugin(SidechannelPlugin):
 
     name = "evtx_ingest"
     description = "Windows event log ingest and Hayabusa analysis for incident response"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -40,7 +52,79 @@ class EvtxIngestPlugin(SidechannelPlugin):
             "ingest-results": self._handle_ingest_results,
         }
 
-    # ── handlers ─────────────────────────────────────────────
+    # ── attachment handlers ──────────────────────────────────
+
+    def attachment_handlers(self) -> List[AttachmentHandler]:
+        return [
+            AttachmentHandler(
+                priority=10,
+                match_fn=self._is_evtx_attachment,
+                handle_fn=self._handle_evtx_attachment,
+                description="EVTX file ingest via Hayabusa",
+            )
+        ]
+
+    @staticmethod
+    def _is_evtx_attachment(filename: str, content_type: str) -> bool:
+        """Match .evtx file attachments."""
+        if filename and filename.lower().endswith(".evtx"):
+            return True
+        if content_type in (
+            "application/x-ms-evtx",
+            "application/octet-stream",
+        ) and filename.lower().endswith(".evtx"):
+            return True
+        return False
+
+    async def _handle_evtx_attachment(
+        self, sender: str, file_path: Path, filename: str, message: str
+    ) -> str:
+        """Handle an .evtx file sent as a Signal attachment."""
+        # Check for Hayabusa binary
+        hayabusa_path = self.ctx.get_config("hayabusa_path")
+        binary = find_hayabusa_binary(hayabusa_path)
+        if not binary:
+            return (
+                "❌ Hayabusa binary not found.\n\n"
+                "Install Hayabusa from:\n"
+                "https://github.com/Yamato-Security/hayabusa/releases\n\n"
+                "Then either add it to your PATH or set hayabusa_path in config:\n"
+                "  plugins:\n"
+                "    evtx_ingest:\n"
+                "      hayabusa_path: /path/to/hayabusa"
+            )
+
+        # Check if an analysis is already running
+        if self._current_task and not self._current_task.done():
+            return (
+                f"⏳ Analysis already in progress on: {self._running_file}\n"
+                "Use /ingest-status to check progress."
+            )
+
+        # Prepare output directory
+        output_dir = str(self.ctx.data_dir / "results")
+
+        # Launch analysis in background
+        display_name = filename or file_path.name
+        self._running_file = display_name
+        self._current_task = asyncio.create_task(
+            self._run_analysis(
+                sender=sender,
+                evtx_path=str(file_path),
+                output_dir=output_dir,
+                hayabusa_path=hayabusa_path,
+                send_output_file=True,
+            )
+        )
+
+        return (
+            f"📎 Received: {display_name}\n"
+            f"🚀 Starting Hayabusa analysis...\n"
+            "You'll receive the results summary and output file when complete.\n"
+            "Use /ingest-status to check progress."
+        )
+
+    # ── command handlers ─────────────────────────────────────
 
     async def _handle_ingest(self, sender: str, args: str) -> str:
         """Ingest and analyze a Windows .evtx file with Hayabusa."""
@@ -48,7 +132,9 @@ class EvtxIngestPlugin(SidechannelPlugin):
         if not evtx_path:
             return (
                 "Usage: /ingest <path-to-evtx-file>\n\n"
-                "Example: /ingest /cases/evidence/Security.evtx"
+                "Example: /ingest /cases/evidence/Security.evtx\n\n"
+                "💡 Tip: You can also send .evtx files directly as Signal "
+                "attachments — they'll be analyzed automatically."
             )
 
         # Validate the file exists and has correct extension
@@ -90,6 +176,7 @@ class EvtxIngestPlugin(SidechannelPlugin):
                 evtx_path=evtx_path,
                 output_dir=output_dir,
                 hayabusa_path=hayabusa_path,
+                send_output_file=True,
             )
         )
 
@@ -102,7 +189,10 @@ class EvtxIngestPlugin(SidechannelPlugin):
     async def _handle_ingest_status(self, sender: str, args: str) -> str:
         """Check the status of the current analysis."""
         if self._current_task is None:
-            return "No analysis has been started. Use /ingest <path> to begin."
+            return (
+                "No analysis has been started.\n"
+                "Use /ingest <path> or send an .evtx file to begin."
+            )
 
         if not self._current_task.done():
             return f"⏳ Analysis in progress: {self._running_file}"
@@ -122,7 +212,7 @@ class EvtxIngestPlugin(SidechannelPlugin):
     async def _handle_ingest_results(self, sender: str, args: str) -> str:
         """Show the latest analysis results summary."""
         if self._latest_result is None:
-            return "No results available. Use /ingest <path> to analyze a file."
+            return "No results available.\n" "Use /ingest <path> or send an .evtx file to analyze."
 
         max_records = self.ctx.get_config("max_summary_records", 20)
         return self._latest_result.summary(max_records=max_records)
@@ -135,6 +225,7 @@ class EvtxIngestPlugin(SidechannelPlugin):
         evtx_path: str,
         output_dir: str,
         hayabusa_path: Optional[str],
+        send_output_file: bool = False,
     ) -> None:
         """Run Hayabusa analysis and notify the sender when done."""
         try:
@@ -156,6 +247,16 @@ class EvtxIngestPlugin(SidechannelPlugin):
             if result.success:
                 summary = result.summary(max_records=self.ctx.get_config("max_summary_records", 20))
                 await self.ctx.send_message(sender, summary)
+
+                # Send the output file back via Signal
+                if send_output_file and result.output_path:
+                    output_file = Path(result.output_path)
+                    if output_file.is_file():
+                        await self.ctx.send_file(
+                            sender,
+                            output_file,
+                            f"📎 Hayabusa results for {Path(evtx_path).name}",
+                        )
             else:
                 await self.ctx.send_message(
                     sender,
