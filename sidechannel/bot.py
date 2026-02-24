@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import aiohttp
 import structlog
 
+from .attachments import process_attachments
 from .config import get_config
 from .security import is_authorized, sanitize_input, check_rate_limit
 from .claude_runner import get_runner
@@ -79,6 +80,10 @@ class SignalBot:
             max_context_tokens=self.config.memory_max_context_tokens
         )
         self.memory_commands = MemoryCommands(self.memory)
+
+        # Attachments directory
+        self.attachments_dir = Path(self.config.config_dir).parent / "data" / "attachments"
+        self.attachments_dir.mkdir(parents=True, exist_ok=True)
 
         # Autonomous system (initialized after memory in start())
         self.autonomous_manager: Optional[AutonomousManager] = None
@@ -1031,11 +1036,13 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             envelope = msg.get("envelope", {})
             source = envelope.get("source") or envelope.get("sourceNumber")
             message_text = None
+            attachments_list = []
 
             # Check for regular data message (from others TO us)
             data_message = envelope.get("dataMessage")
             if data_message:
                 message_text = data_message.get("message", "")
+                attachments_list = data_message.get("attachments") or []
 
             # Check for sync message (our own messages sent from another device)
             sync_message = envelope.get("syncMessage")
@@ -1052,19 +1059,45 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                     # Only process if sent to ourselves (the bot's number)
                     if destination and destination == self.account:
                         message_text = sent_message.get("message", "")
+                        attachments_list = sent_message.get("attachments") or []
                         source = self.account
 
             # Ignore receipts, typing indicators, and other message types
-            if not message_text or not message_text.strip():
+            # Allow messages with attachments even if text is empty
+            has_text = message_text and message_text.strip()
+            if not has_text and not attachments_list:
                 return
 
             # SECURITY: Only process messages from authorized sources
             if not source:
                 return
 
+            # Process file attachments
+            saved_files = []
+            if attachments_list and self.session:
+                saved_files = await process_attachments(
+                    attachments=attachments_list,
+                    sender=source,
+                    session=self.session,
+                    signal_api_url=self.config.signal_api_url,
+                    attachments_dir=self.attachments_dir,
+                )
+
+            # Build effective message text including file references
+            effective_text = (message_text or "").strip()
+            if saved_files:
+                file_refs = "\n".join(f"- {path}" for path in saved_files)
+                if effective_text:
+                    effective_text = f"{effective_text}\n\nAttached files saved to:\n{file_refs}"
+                else:
+                    effective_text = f"Analyze the following attached files:\n{file_refs}"
+
+            if not effective_text:
+                return
+
             # Deduplication: Signal sends both dataMessage and syncMessage for self-messages
             timestamp = envelope.get("timestamp", 0)
-            msg_hash = hashlib.sha256(f"{timestamp}:{message_text.strip()}".encode()).hexdigest()
+            msg_hash = hashlib.sha256(f"{timestamp}:{effective_text.strip()}".encode()).hexdigest()
             if msg_hash in self._processed_messages:
                 logger.debug("duplicate_message_skipped", timestamp=timestamp)
                 return
@@ -1079,8 +1112,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 else:
                     break
 
-            logger.info("processing_message", source="..." + source[-4:], length=len(message_text))
-            await self._process_message(source, message_text)
+            logger.info("processing_message", source="..." + source[-4:], length=len(effective_text),
+                        attachments=len(saved_files))
+            await self._process_message(source, effective_text)
 
         except Exception as e:
             logger.error("message_handling_error", error=str(e), msg=str(msg)[:200])
